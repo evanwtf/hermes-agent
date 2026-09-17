@@ -1,0 +1,74 @@
+# Compose override: tooled image + local-llm sweep mount + bridge networking
+# (gateway only) + least-privilege container hardening.
+#
+# Usage (explicit -f for both; NOT auto-merged — it lives under deploy/ so the
+# base build isn't hijacked before hermes-agent:latest exists):
+#   HERMES_UID=$(id -u) HERMES_GID=$(id -g) \
+#     docker compose -f docker-compose.yml \
+#                    -f deploy/docker-compose.override.yml up -d --build
+#
+# WHY hardening matters: Hermes' code-execution path has NO OS-level sandbox
+# (no bwrap/nsjail/seccomp beyond Docker's default) — a subprocess with
+# env-scrubbing only. The CONTAINER is the boundary, and this agent runs
+# arbitrary code and is reachable from Discord.
+
+# ---- Reusable least-privilege block --------------------------------------
+# cap_drop ALL, then add back ONLY what s6 needs at boot:
+#   usermod/groupmod (uid remap) + chown -R  -> CHOWN, DAC_OVERRIDE, FOWNER, SETPCAP
+#   s6-setuidgid (drop to hermes)            -> SETUID, SETGID
+#   s6 supervision signals                   -> KILL
+# no-new-privileges blocks setuid escalation (agent can't sudo — bake tools in
+# the image). If boot fails, read the s6 log and add the one cap it names.
+x-hardening: &hardening
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETPCAP
+    - SETUID
+    - SETGID
+    - KILL
+  security_opt:
+    - "no-new-privileges:true"
+  pids_limit: 1024
+  # Optional ceilings (tune to the box; uncomment to bound a runaway agent):
+  # mem_limit: 8g
+  # cpus: "6"
+  # Optional AGGRESSIVE read-only rootfs (/opt/data stays writable). Test
+  # code-exec + grok + uvx first — they may write outside /opt/data:
+  # read_only: true
+  # tmpfs:
+  #   - /run
+  #   - /tmp
+
+services:
+  gateway:
+    <<: *hardening
+    build:
+      context: deploy
+      dockerfile: Dockerfile.tools
+    image: hermes-agent-tools
+    network_mode: bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /home/evan/git/local-llm:/opt/data/git/local-llm:ro
+    # No inbound ports (Discord is outbound; the OpenAI API server stays off).
+    # Deliberately NO /var/run/docker.sock mount: docker-cli is in the image,
+    # but without the socket there is no daemon access and thus no escape.
+    # If Hermes' own model.default points at a LOCAL engine, change that URL
+    # from 127.0.0.1 to host.docker.internal (bridge can't see host loopback).
+
+  # The dashboard STAYS on host networking (inherited from the base). Hermes
+  # hard-maps its --host 0.0.0.0/:: back to 127.0.0.1 and --insecure does not
+  # override it (main_dashboard.py / web_server_lifecycle.py), so it only binds
+  # loopback. You cannot port-publish a loopback-bound service through a bridge
+  # (Docker forwards to the container's eth0 IP, not its loopback) — that is why
+  # binding 0.0.0.0 was refused. Host networking makes its loopback bind = the
+  # HOST's 127.0.0.1:9119, as designed. Reach it via: ssh -L 9119:localhost:9119
+  # It is the low-risk service (UI over the shared volume + vLLM), so it keeps
+  # host networking but still gets capability hardening.
+  dashboard:
+    <<: *hardening
