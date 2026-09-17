@@ -1,0 +1,54 @@
+# Derived image: base hermes-agent + toolbelt (gh, hf, xurl, grok).
+#
+# Build order (see README.md) — two steps because this is FROM the base:
+#   1) docker compose build          # produces hermes-agent:latest (the base)
+#   2) docker compose -f docker-compose.yml -f deploy/docker-compose.override.yml build
+#
+# WHY a derived image and not edits to the upstream Dockerfile: keeps this fork
+# mergeable with Nous upstream. Everything local lives under deploy/.
+#
+# WHY file-based auth and no ENV tokens: Hermes' code-execution sandbox
+# (tools/code_execution_env.py) scrubs any env var whose name contains
+# KEY/TOKEN/SECRET/AUTH before shelling out, but injects HOME. So gh/hf/xurl/
+# grok are wired entirely through files under $HOME (=/opt/data, the
+# ~/.hermes volume). No secrets are baked into this image.
+
+FROM hermes-agent:latest
+
+USER root
+
+# --- gh: official GitHub CLI apt repo (self-updating, multi-arch) ----------
+RUN install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get -o Acquire::Retries=3 update \
+ && apt-get -o Acquire::Retries=3 install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- hf: Hugging Face CLI via uv (installed OUTSIDE /opt/data so the runtime
+#     volume overlay does not hide it; launcher lands on the system PATH) -----
+RUN UV_TOOL_DIR=/opt/hermes/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+    uv tool install --no-cache huggingface_hub
+
+# --- xurl: official release, checksum-verified (arm64 = the DGX / GB10) ------
+# Bump XURL_VERSION + XURL_SHA256 together; sha from the release checksums.txt.
+ARG XURL_VERSION=1.3.1
+ARG XURL_SHA256=22474398fb55fe2ae242cc1b940dd5d92c0083508d108ec95922d1adacd2bb76
+RUN curl -fsSL --retry 3 -o /tmp/xurl.tgz \
+      "https://github.com/xdevplatform/xurl/releases/download/v${XURL_VERSION}/xurl_Linux_arm64.tar.gz" \
+ && printf '%s  %s\n' "${XURL_SHA256}" /tmp/xurl.tgz | sha256sum -c - \
+ && tar -xzf /tmp/xurl.tgz -C /usr/local/bin xurl \
+ && chmod 0755 /usr/local/bin/xurl \
+ && rm /tmp/xurl.tgz \
+ && xurl --version
+
+# --- grok: binary + state provided at runtime from ~/.hermes/.grok (staged by
+#     stage-creds.sh). Dangling at build; resolves once /opt/data is mounted. --
+RUN ln -sf /opt/data/.grok/bin/grok /usr/local/bin/grok
+
+# Stay as root: the base ENTRYPOINT runs s6 /init as PID 1 (root) and drops to
+# the hermes user per-service via s6-setuidgid. Do NOT add `USER hermes` here —
+# it would break s6's cont-init.d (chown/usermod) and the privilege drop.
