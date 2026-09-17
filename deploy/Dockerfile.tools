@@ -45,9 +45,10 @@ RUN curl -fsSL --retry 3 -o /tmp/xurl.tgz \
  && rm /tmp/xurl.tgz \
  && xurl --version
 
-# --- grok: binary + state provided at runtime from ~/.hermes/.grok (staged by
-#     stage-creds.sh). Dangling at build; resolves once /opt/data is mounted. --
-RUN ln -sf /opt/data/.grok/bin/grok /usr/local/bin/grok
+# --- grok: binary + state provided at runtime from ~/.hermes/home/.grok (the
+#     agent subprocess $HOME = /opt/data/home; staged by stage-creds.sh).
+#     Dangling at build; resolves once /opt/data is mounted. --------------------
+RUN ln -sf /opt/data/home/.grok/bin/grok /usr/local/bin/grok
 
 # Stay as root: the base ENTRYPOINT runs s6 /init as PID 1 (root) and drops to
 # the hermes user per-service via s6-setuidgid. Do NOT add `USER hermes` here —

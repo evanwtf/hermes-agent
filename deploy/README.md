@@ -7,11 +7,14 @@ credentials are never in the repo — `stage-creds.sh` writes them into
 `~/.hermes` (the mounted volume) at deploy time.
 
 ## Design in one paragraph
-The base mounts `~/.hermes` at `/opt/data`, which is the container user's
-`$HOME`. Hermes' code-execution sandbox **scrubs** env vars containing
-KEY/TOKEN/SECRET/AUTH but **injects HOME**, so every CLI is wired through files
-under `~/.hermes` at its default `$HOME` path — no env tokens, no secrets in the
-image. Tools are added in a **derived image** (`Dockerfile.tools`,
+The base mounts `~/.hermes` at `/opt/data` (the gateway's `HERMES_HOME`).
+Crucially, Hermes runs agent **subprocesses** with an isolated home at
+**`/opt/data/home`** (`get_subprocess_home` → `{HERMES_HOME}/home` in a
+container), *not* `/opt/data`. Its code-execution sandbox **scrubs** env vars
+containing KEY/TOKEN/SECRET/AUTH but **injects HOME**, so every CLI is wired
+through files under **`~/.hermes/home`** (= `/opt/data/home`) at its default
+`$HOME` path — no env tokens, no secrets in the image. (Staging into `~/.hermes`
+instead of `~/.hermes/home` is off by one dir and tools won't find their auth.) Tools are added in a **derived image** (`Dockerfile.tools`,
 `FROM hermes-agent`) to keep the fork mergeable with upstream. The override also
 moves the gateway to **bridge networking** and applies **least-privilege**
 capabilities (see §9). Credentials are **scoped**: gh = a fine-grained token
@@ -23,8 +26,8 @@ limited to `evanwtf/local-llm` (Issues:write, else read); xurl = app-only
   release, checksum-verified), grok (runtime symlink to the mounted `~/.grok`).
 - `docker-compose.override.yml` — tooled image, local-llm ro mount, bridge net
   (gateway), capability hardening. Pass it with explicit `-f` (see below).
-- `stage-creds.sh` — populates `~/.hermes/{.config/gh,.xurl,.cache/huggingface,
-  .grok,.gitconfig}`. You run it; it never prints secrets.
+- `stage-creds.sh` — populates `~/.hermes/home/{.config/gh,.xurl,.cache/huggingface,
+  .grok,.gitconfig}` (the agent subprocess `$HOME`). You run it; never prints secrets.
 - `sweep-prompt.md` — the cron job's prompt.
 
 All commands below run from the repo root.
@@ -64,11 +67,13 @@ HERMES_UID=$(id -u) HERMES_GID=$(id -g) \
 ```
 
 ### 6. Verify the toolbelt inside the container
+Run it as the agent's user + subprocess `$HOME` (a bare `docker exec` runs as
+root with `HOME=/root` and would NOT see the staged creds):
 ```bash
-docker exec -it hermes bash -lc '
-  gh --version && gh auth status &&
+docker exec -u hermes -e HOME=/opt/data/home hermes bash -lc '
+  gh auth status &&
   hf version &&
-  xurl search --app default "dgx spark" -n 3 | head &&
+  xurl auth apps list &&
   grok --version &&
   git -C /opt/data/git/local-llm log -1 --oneline'
 ```
