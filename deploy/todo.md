@@ -40,6 +40,11 @@ The deploy branch is committed but the push was blocked (needs your hand):
       `x_search` tool (interactive OAuth, one time).
 
 ## 4. Stage credentials into ~/.hermes
+- [ ] If `~/.hermes` is owned by uid 10000 (a prior container started without
+      HERMES_UID chowned it), reclaim it first:
+      `sudo chown -R "$(id -u):$(id -g)" ~/.hermes`
+      Then ALWAYS launch with `HERMES_UID=$(id -u) HERMES_GID=$(id -g)` so it
+      stays yours (stop any old container started without it).
 - [ ] `bash deploy/stage-creds.sh`  → paste the GitHub token when prompted.
       (Copies xurl/hf/grok auth + writes git identity; no secrets printed.)
 
