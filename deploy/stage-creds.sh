@@ -13,6 +13,24 @@ set -euo pipefail
 HERMES_HOME="${HERMES_DATA_DIR:-$HOME/.hermes}"
 umask 077
 
+# Preflight: ~/.hermes must be writable by the current user. If a container was
+# ever started WITHOUT HERMES_UID/HERMES_GID, the image chowned it to the
+# internal hermes user (uid 10000) and this user can no longer write there.
+if [ -e "${HERMES_HOME}" ] && [ ! -w "${HERMES_HOME}" ]; then
+  owner="$(stat -c '%u:%g' "${HERMES_HOME}" 2>/dev/null || echo '?')"
+  cat >&2 <<EOF
+!! ${HERMES_HOME} is not writable by $(id -un) (uid $(id -u)); it is owned by ${owner}.
+   A container was started without HERMES_UID/HERMES_GID and chowned it to the
+   internal hermes user. Fix, then re-run this script:
+
+     sudo chown -R "\$(id -u):\$(id -g)" "${HERMES_HOME}"
+
+   And ALWAYS launch the container with the uid so it stays yours:
+     HERMES_UID=\$(id -u) HERMES_GID=\$(id -g) docker compose ... up -d
+EOF
+  exit 1
+fi
+
 echo ">> Staging into ${HERMES_HOME}"
 mkdir -p "${HERMES_HOME}/.config/gh" \
          "${HERMES_HOME}/.cache/huggingface" \
